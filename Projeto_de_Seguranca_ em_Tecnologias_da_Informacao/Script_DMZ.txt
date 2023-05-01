@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+iptables -F
+systemctl stop firewalld
+systemctl disable firewalld
+route add default gw 23.214.219.254 ens37
+
+route add -net 192.168.10.0/24 gw 23.214.219.254 #Internal network
+route add -net 87.248.214.0/24 gw 23.214.219.254 #Internet
+

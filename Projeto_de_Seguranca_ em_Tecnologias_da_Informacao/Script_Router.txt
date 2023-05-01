@@ -1,0 +1,163 @@
+#!/usr/bin/env sh
+
+
+#DMZ's IPs
+
+DMZ="23.214.219.128/25"
+mail="23.214.219.129"
+dns="23.214.219.130"
+smtp="23.214.219.131"
+www="23.214.219.132"
+vpn_gw="23.214.219.133"
+
+#Internal Network's IPs
+
+Internal_Network="192.168.10.0/24"
+DMZ_Network="23.214.219.128/25"
+DHCP_Client1="192.168.10.1"
+DHCP_Client2="192.168.10.2"
+DHCP_Client3="192.168.10.3"
+ftp="192.168.10.4"
+datastore="192.168.10.5"
+
+#Internet IPs
+
+Internet="87.248.214.0/24"
+dns2="87.248.214.1"
+eden="87.248.214.2"
+
+#Router IPs
+i_DMZ="23.214.219.254"
+i_InternalNetwork="192.168.10.254"
+i_Internet="87.248.214.97"
+
+
+iptables -F
+iptables -X
+iptables -Z
+systemctl stop firewalld
+systemctl disable firewalld
+
+
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+
+#connection established
+iptables -t filter -A FORWARD -m state --state RELATED,ESTABLISHED -j NFQUEUE --queue-num 0
+
+
+#allow ping
+sudo iptables -A INPUT -p icmp -j NFQUEUE --queue-num 0
+sudo iptables -A FORWARD -p icmp -j NFQUEUE --queue-num 0
+
+# Allow DNS connections INPUT
+iptables -A INPUT -p udp --dport 53 -j NFQUEUE --queue-num 0
+
+
+# Allow DNS traffic for name resolution
+iptables -A INPUT -p udp --sport 53 -j NFQUEUE --queue-num 0
+iptables -A OUTPUT -p udp --dport 53 -j NFQUEUE --queue-num 0
+
+# Allow SSH connections INPUT
+iptables -A INPUT -p tcp -s ${Internal_Network} --dport 22 -j NFQUEUE --queue-num 0
+iptables -A INPUT -p tcp -s ${vpn_gw} --dport 22 -j NFQUEUE --queue-num 0
+
+##
+
+#Allow DNS traffic for name resolution
+iptables -A FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0
+
+# Allow DNS traffic to Internet DNS servers
+iptables -t filter -A FORWARD -p udp --dport 53 -d ${dns2} -j NFQUEUE --queue-num 0
+iptables -t filter -A FORWARD -p udp --dport 53 -d ${dns} -j NFQUEUE --queue-num 0
+
+# Allow DNS zone synchronization between dns and dns2 servers
+iptables -A FORWARD -p tcp --dport 53 -s ${dns2} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --sport 53 -d ${dns2} -j NFQUEUE --queue-num 0
+
+
+# Allow SMTP connections
+iptables -A FORWARD -p tcp --dport 25 -d ${smtp} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --sport 25 -s ${smtp} -j NFQUEUE --queue-num 0
+
+# Allow POP/IMAP connections
+iptables -A FORWARD -p tcp --dport 110 -d ${mail} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --dport 143 -d ${mail} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --dport 993 -d ${mail} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --dport 995 -d ${mail} -j NFQUEUE --queue-num 0
+
+# Allow HTTP/HTTPS connections
+iptables -A FORWARD -p tcp --dport 80 -d ${www} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp --dport 443 -d ${www} -j NFQUEUE --queue-num 0
+
+# Allow OpenVPN connections
+iptables -A FORWARD -p udp --dport 1194 -d ${vpn_gw} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p udp --dport 443 -d ${vpn_gw} -j NFQUEUE --queue-num 0
+
+# Allow VPN clients to connect to all services in the internal network
+iptables -A FORWARD -s ${vpn_gw} -d ${ftp} -j NFQUEUE --queue-num 0
+iptables -A FORWARD -s ${vpn_gw} -d ${datastore} -j NFQUEUE --queue-num 0
+
+# Enable SNAT/MASQUERADING for VPN clients
+
+iptables -t nat -A POSTROUTING -s ${vpn_gw} -o ens36 -j MASQUERADE
+
+
+# FTP NAT
+
+modprobe ip_conntrack_ftp
+modprobe nf_nat_ftp
+
+iptables -A FORWARD -p tcp -d ${Internal_Network}  -s ${Internet} --sport 21 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -s ${Internal_Network}  -d ${Internet} --dport 20 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -d ${ftp} --dport 21 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -s ${ftp} --sport 20 -j NFQUEUE --queue-num 0
+
+
+iptables -t nat -A PREROUTING -p tcp -s ${Internet} -d ${i_Internet} --dport 21 -j DNAT --to-destination ${ftp}
+iptables -t nat -A PREROUTING -p tcp -s ${Internet} -d ${i_Internet} --dport 20 -j DNAT --to-destination ${ftp}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 21 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 20 -j SNAT --to-source ${i_Internet}
+
+#SSH NAT
+
+iptables -A FORWARD -p tcp -s ${eden} -d ${datastore} --dport 22 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -s ${dns2} -d ${datastore} --dport 22 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -s ${Internal_Network} -p tcp --dport 22 -j NFQUEUE --queue-num 0
+
+
+iptables -t nat -A PREROUTING -p tcp -s ${Internet} -d ${i_Internet} --dport 22 -j DNAT --to-destination ${datastore}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 22 -j SNAT --to-source ${i_Internet}
+
+# Domain name resolutions using DNS (internal to outside)
+iptables -A FORWARD -p tcp -s ${Internal_Network} -d ${Internet} --dport 53 -j NFQUEUE --queue-num 0  
+iptables -A FORWARD -p udp -s ${Internal_Network} -d ${Internet} --dport 53 -j NFQUEUE --queue-num 0
+
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 53 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p udp -s ${Internal_Network} -d ${Internet} --dport 53 -j SNAT --to-source ${i_Internet}
+
+# HTTP, HTTPS and SSH connections (internal to outside)
+iptables -A FORWARD -p tcp -s ${Internal_Network} -d ${Internet} --dport 80 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p udp -s ${Internal_Network} -d ${Internet} --dport 443 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -s ${Internal_Network} -d ${Internet} --dport 443 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -s ${Internal_Network} -d ${Internet} --dport 22 -j NFQUEUE --queue-num 0
+
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 80 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p udp -s ${Internal_Network} -d ${Internet} --dport 443 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 443 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 22 -j SNAT --to-source ${i_Internet}
+
+# FTP connections (in passive and active modes) to external FTP servers.
+iptables -A FORWARD -p tcp -s ${Internal_Network} --dport 21 -j NFQUEUE --queue-num 0
+iptables -A FORWARD -p tcp -d ${Internal_Network} --dport 20 -j NFQUEUE --queue-num 0
+
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 20 -j SNAT --to-source ${i_Internet}
+iptables -t nat -A POSTROUTING -p tcp -s ${Internal_Network} -d ${Internet} --dport 21 -j SNAT --to-source ${i_Internet}
+
+#allow SQL
+
+sudo iptables -A INPUT -p tcp --dport 1433 -j NFQUEUE --queue-num 0
+sudo iptables -A OUTPUT -p tcp --dport 1433 -j NFQUEUE --queue-num 0
+sudo iptables -A FORWARD -p tcp --dport 1433 -j NFQUEUE --queue-num 0
+
